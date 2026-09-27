@@ -90,9 +90,10 @@ def write_note(
 
         frontmatter_preserved = False
         if not _FM_RE.match(content) and before:
-            existing_fm, _ = _parse_frontmatter(before)
-            if existing_fm:
-                content = _serialize_frontmatter(existing_fm, content)
+            existing = _FM_RE.match(before)
+            if existing and _has_frontmatter_keys(existing.group(1)):
+                head = existing.group(0)
+                content = (head if head.endswith("\n") else head + "\n") + content
                 frontmatter_preserved = True
 
         diff = _unified_diff(before, content, path)
@@ -446,22 +447,164 @@ _FM_RE = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
 _INLINE_TAG_RE = re.compile(r"(?<!\S)#([\w/]+)")
 
 
+# A top-level mapping key at column 0: "key:", "'key':" or "\"key\":".
+_FM_KEY_RE = re.compile(
+    r"""^(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<plain>[^\s#'"\-\[\]{}?][^:]*?))[ \t]*:(?:[ \t]|$)"""
+)
+# YAML 1.1 implicit timestamp (same shape PyYAML resolves to date/datetime).
+_YAML_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{1,2}-\d{1,2}"
+    r"(?:(?:[Tt]|[ \t]+)\d{1,2}:\d{2}:\d{2}(?:\.\d*)?(?:[ \t]*(?:Z|[-+]\d{1,2}(?::\d{2})?))?)?$"
+)
+_DEFAULT_LIST_INDENT = "  "
+
+
+def _load_frontmatter_block(text: str) -> dict:
+    """Parse a frontmatter block's YAML, refusing anything that is not a mapping."""
+    try:
+        fm = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Frontmatter is not valid YAML: {exc}") from exc
+    if fm is None:
+        return {}
+    if not isinstance(fm, dict):
+        raise ValueError("Frontmatter is not a YAML mapping")
+    return fm
+
+
 def _parse_frontmatter(raw: str) -> tuple[dict, str]:
     """Parse YAML frontmatter block. Returns (fm_dict, body_text)."""
     m = _FM_RE.match(raw)
     if m:
-        try:
-            fm: dict = yaml.safe_load(m.group(1)) or {}
-        except Exception:
-            fm = {}
-        return fm, raw[m.end():]
+        return _load_frontmatter_block(m.group(1)), raw[m.end():]
     return {}, raw
 
 
-def _serialize_frontmatter(fm: dict, body: str) -> str:
-    """Serialize frontmatter dict and body back to a note string."""
-    new_fm = yaml.dump(fm, allow_unicode=True, default_flow_style=False).strip()
-    return f"---\n{new_fm}\n---\n{body}"
+def _has_frontmatter_keys(text: str) -> bool:
+    try:
+        return bool(_load_frontmatter_block(text))
+    except ValueError:
+        return False
+
+
+def _frontmatter_key_spans(lines: list[str]) -> dict[str, tuple[int, int]]:
+    """Map each top-level key to the [start, end) line range its entry occupies."""
+    starts: list[tuple[int, str]] = []
+    for i, line in enumerate(lines):
+        m = _FM_KEY_RE.match(line)
+        if m:
+            starts.append((i, next(g for g in (m["dq"], m["sq"], m["plain"]) if g is not None)))
+
+    spans: dict[str, tuple[int, int]] = {}
+    for n, (start, key) in enumerate(starts):
+        end = starts[n + 1][0] if n + 1 < len(starts) else len(lines)
+        # Blank lines and column-0 comments after an entry belong to the layout, not the value.
+        while end > start + 1 and (not lines[end - 1].strip() or lines[end - 1].startswith("#")):
+            end -= 1
+        spans[key] = (start, end)  # last occurrence wins, like the YAML loader
+    return spans
+
+
+def _dump_scalar(value) -> str:
+    """Render a scalar as a single YAML token without quoting ISO date/time strings."""
+    if isinstance(value, str) and _YAML_TIMESTAMP_RE.match(value):
+        return value
+    text = yaml.safe_dump(value, allow_unicode=True, default_flow_style=True, width=float("inf"))
+    return text.removesuffix("\n").removesuffix("\n...").rstrip("\n")
+
+
+def _dump_key(key) -> str:
+    return _dump_scalar(key) if isinstance(key, str) else _dump_scalar(str(key))
+
+
+def _is_scalar(value) -> bool:
+    return not isinstance(value, (dict, list))
+
+
+def _render_entry(key, value, old_lines: list[str] | None) -> list[str]:
+    """Render one top-level entry, keeping the list style of the entry it replaces."""
+    key_text = _dump_key(key)
+    if _is_scalar(value):
+        return [f"{key_text}: {_dump_scalar(value)}"]
+
+    old_inline = ""
+    old_item_indent = None
+    if old_lines:
+        m = _FM_KEY_RE.match(old_lines[0])
+        old_inline = old_lines[0][m.end():].strip() if m else ""
+        for line in old_lines[1:]:
+            if line.lstrip().startswith("-"):
+                old_item_indent = line[: len(line) - len(line.lstrip())]
+                break
+
+    if isinstance(value, list) and (not value or old_inline.startswith("[")):
+        flow = yaml.safe_dump(value, allow_unicode=True, default_flow_style=True, width=float("inf"))
+        return [f"{key_text}: {flow.strip()}"]
+    if isinstance(value, list) and all(_is_scalar(v) for v in value):
+        indent = _DEFAULT_LIST_INDENT if old_item_indent is None else old_item_indent
+        return [f"{key_text}:"] + [f"{indent}- {_dump_scalar(v)}" for v in value]
+
+    block = yaml.safe_dump(
+        {key: value}, allow_unicode=True, default_flow_style=False, sort_keys=False
+    )
+    return block.rstrip("\n").split("\n")
+
+
+def _same_value(written, loaded) -> bool:
+    if written == loaded:
+        return True
+    # An ISO string written unquoted reads back as a date/datetime; that is intended.
+    return isinstance(written, str) and _YAML_TIMESTAMP_RE.match(written) is not None and (
+        yaml.safe_load(written) == loaded
+    )
+
+
+def _patch_frontmatter_text(raw: str, changes: dict) -> str:
+    """Set top-level frontmatter keys, rewriting only the lines of keys whose value changed.
+
+    Untouched keys keep their exact text (order, quoting, date format, list style),
+    so the resulting diff is limited to the entries that actually changed.
+    """
+    m = _FM_RE.match(raw)
+    if not m:
+        if not changes:
+            return raw
+        lines = [line for key, value in changes.items() for line in _render_entry(key, value, None)]
+        return "---\n" + "\n".join(lines) + "\n---\n" + raw
+
+    fm = _load_frontmatter_block(m.group(1))
+    lines = m.group(1).split("\n") if m.group(1) else []
+    spans = _frontmatter_key_spans(lines)
+
+    replacements: list[tuple[int, int, list[str]]] = []
+    appended: list[str] = []
+    for key, value in changes.items():
+        if key in fm and fm[key] == value:
+            continue
+        if key in spans:
+            start, end = spans[key]
+            replacements.append((start, end, _render_entry(key, value, lines[start:end])))
+        elif key in fm:
+            raise ValueError(f"Cannot locate frontmatter key {key!r} for an in-place edit")
+        else:
+            appended.extend(_render_entry(key, value, None))
+
+    if not replacements and not appended:
+        return raw
+    for start, end, new_lines in sorted(replacements, reverse=True):
+        lines[start:end] = new_lines
+    lines.extend(appended)
+    new_block = "\n".join(lines)
+
+    # Guard against a rendering that would silently change or drop other keys.
+    expected = {**fm, **changes}
+    result = _load_frontmatter_block(new_block)
+    if result.keys() != expected.keys() or not all(
+        _same_value(expected[k], result[k]) for k in expected
+    ):
+        raise ValueError("Frontmatter patch failed verification; note left unchanged")
+
+    return raw[: m.start(1)] + new_block + raw[m.end(1):]
 
 
 def manage_tags(
@@ -501,17 +644,16 @@ def manage_tags(
 
 def _apply_tag_changes(raw: str, add: list[str], remove: list[str]) -> str:
     fm, body = _parse_frontmatter(raw)
+    head = raw[: len(raw) - len(body)]
 
-    current: list = fm.get("tags", [])
-    if not isinstance(current, list):
-        current = [current] if current else []
+    current = fm.get("tags", [])
+    current = list(current) if isinstance(current, list) else ([current] if current else [])
 
     for tag in add:
         if tag not in current:
             current.append(tag)
     for tag in remove:
         current = [t for t in current if t != tag]
-    fm["tags"] = current
 
     # Strip removed tags from body inline (#tag syntax)
     for tag in remove:
@@ -519,20 +661,22 @@ def _apply_tag_changes(raw: str, add: list[str], remove: list[str]) -> str:
     # Collapse multiple spaces created by removal
     body = re.sub(r"[ \t]{2,}", " ", body)
 
-    return _serialize_frontmatter(fm, body)
+    changes = {"tags": current} if current or "tags" in fm else {}
+    return _patch_frontmatter_text(head + body, changes)
 
 
 def _apply_frontmatter_updates(raw: str, updates: dict, merge_arrays: bool) -> str:
-    fm, body = _parse_frontmatter(raw)
+    fm, _ = _parse_frontmatter(raw)
 
+    changes: dict = {}
     for key, value in updates.items():
         if merge_arrays and isinstance(value, list) and isinstance(fm.get(key), list):
             existing: list = fm[key]
-            fm[key] = existing + [v for v in value if v not in existing]
+            changes[key] = existing + [v for v in value if v not in existing]
         else:
-            fm[key] = value
+            changes[key] = value
 
-    return _serialize_frontmatter(fm, body)
+    return _patch_frontmatter_text(raw, changes)
 
 
 def move_note(from_path: str, to_path: str, index: VaultIndex | None = None) -> dict:

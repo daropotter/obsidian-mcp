@@ -408,6 +408,62 @@ def test_patch_frontmatter_diff_on_real_write(tmp_path, vault_factory):
     assert "+status: done" in result["diff"]
 
 
+def test_patch_frontmatter_only_touches_changed_lines(tmp_path, vault_factory):
+    original = (
+        "---\n"
+        "type: capture\n"
+        "status: inbox\n"
+        "tags: [projekt, ai]\n"
+        "created: 2026-09-27T23:10:35\n"
+        "updated: 2026-09-27T23:10:35\n"
+        "aliases:\n"
+        "  - Fridge\n"
+        "---\n"
+        "Body\n"
+    )
+    vault_factory({"note.md": original})
+    result = patch_frontmatter(
+        "note.md", {"project_status": "active", "updated": "2026-09-28T00:53:51"}
+    )
+    content = (tmp_path / "note.md").read_text()
+    assert content == original.replace(
+        "updated: 2026-09-27T23:10:35\n",
+        "updated: 2026-09-28T00:53:51\n",
+    ).replace("  - Fridge\n", "  - Fridge\nproject_status: active\n")
+    changed = [
+        line for line in result["diff"].splitlines()
+        if line[:1] in "+-" and not line.startswith(("+++", "---"))
+    ]
+    assert changed == [
+        "-updated: 2026-09-27T23:10:35",
+        "+updated: 2026-09-28T00:53:51",
+        "+project_status: active",
+    ]
+
+
+def test_patch_frontmatter_keeps_list_style(tmp_path, vault_factory):
+    vault_factory({"note.md": "---\ntags: [a, b]\nrefs:\n    - x\n---\nBody"})
+    patch_frontmatter("note.md", {"tags": ["c"], "refs": ["y"]}, merge_arrays=True)
+    content = (tmp_path / "note.md").read_text()
+    assert content == "---\ntags: [a, b, c]\nrefs:\n    - x\n    - y\n---\nBody"
+
+
+def test_patch_frontmatter_unchanged_value_is_noop(tmp_path, vault_factory):
+    original = "---\nb: 1\na: [x]\ncreated: 2026-09-27T23:10:35\n---\nBody"
+    vault_factory({"note.md": original})
+    result = patch_frontmatter("note.md", {"a": ["x"]}, merge_arrays=True)
+    assert (tmp_path / "note.md").read_text() == original
+    assert result["diff"] == ""
+
+
+def test_patch_frontmatter_rejects_invalid_yaml(tmp_path, vault_factory):
+    original = "---\ntitle: [unclosed\n---\nBody"
+    vault_factory({"note.md": original})
+    with pytest.raises(ValueError, match="not valid YAML"):
+        patch_frontmatter("note.md", {"status": "done"})
+    assert (tmp_path / "note.md").read_text() == original
+
+
 # ── patch_frontmatter_batch ───────────────────────────────────────────────
 
 def test_patch_frontmatter_batch_applies_all(tmp_path, vault_factory):
@@ -463,6 +519,21 @@ def test_manage_tags_remove_from_frontmatter(tmp_path, vault_factory):
     content = (tmp_path / "note.md").read_text()
     assert "foo" not in content
     assert "bar" in content
+
+
+def test_manage_tags_keeps_other_frontmatter_lines(tmp_path, vault_factory):
+    original = "---\nstatus: inbox\ncreated: 2026-09-27T23:10:35\ntags: [foo]\n---\nBody"
+    vault_factory({"note.md": original})
+    manage_tags("note.md", add=["bar"])
+    assert (tmp_path / "note.md").read_text() == original.replace("[foo]", "[foo, bar]")
+
+
+def test_write_note_preserves_frontmatter_verbatim(tmp_path, vault_factory):
+    vault_factory({"note.md": "---\nz: 1\ncreated: 2026-09-27T23:10:35\n---\nOld"})
+    write_note("note.md", "New")
+    assert (tmp_path / "note.md").read_text() == (
+        "---\nz: 1\ncreated: 2026-09-27T23:10:35\n---\nNew"
+    )
 
 
 def test_manage_tags_remove_inline(tmp_path, vault_factory):
