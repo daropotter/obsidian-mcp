@@ -18,6 +18,7 @@ from fastmcp.server.auth.providers.github import GitHubProvider
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools.base import ToolResult
+from mcp.types import ToolAnnotations
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
@@ -828,6 +829,12 @@ class _FeatureFlags:
 
 _feature_flags = _FeatureFlags.from_env()
 
+# Tools that only read vault state opt into readOnlyHint. MCP clients use
+# it to classify tools; ChatGPT's developer mode treats a tool without it
+# as a write action, so unannotated read tools require write confirmation
+# (or are refused on read-only plans). Write tools stay unannotated.
+_READ_ONLY = ToolAnnotations(readOnlyHint=True)
+
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
@@ -846,7 +853,7 @@ def daily_note(date: str = "today") -> str:
 
 # ── Read ──────────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def list_notes_tool(folder: str = "", include_meta: bool = False, vault: str | None = None) -> dict:
     """List all Markdown notes in the vault (or a subfolder).
     Set include_meta=True to get title, tags, status, created per note.
@@ -855,7 +862,7 @@ def list_notes_tool(folder: str = "", include_meta: bool = False, vault: str | N
     return list_result(list_notes(folder, include_meta=include_meta))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def read_note_tool(
     path: str,
     mode: str = "full",
@@ -892,7 +899,7 @@ def read_note_tool(
     raise ValueError(f"Unknown mode: {mode!r}; expected 'full', 'outline' or 'rendered'")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def search_notes_tool(
     query: str,
     tag: str | None = None,
@@ -920,7 +927,7 @@ def search_notes_tool(
     return list_result(items, meta={"truncated": len(items) >= limit})
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def find_similar_notes_tool(
     text: str,
     limit: int = 5,
@@ -1289,21 +1296,21 @@ if _feature_flags.enable_move:
 
 # ── Query / Graph ─────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def get_backlinks_tool(path: str, vault: str | None = None) -> dict:
     """Return all notes that link to the given note (alias-aware).
     data.items is a list of note paths."""
     return list_result(get_backlinks(path, _index))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def get_vault_conventions_tool(vault: str | None = None) -> dict:
     """Return the vault's AI instructions / conventions from _AI_INSTRUCTIONS.md.
     data.conventions is the raw Markdown."""
     return read_result(None, {"conventions": get_vault_conventions()})
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def get_audit_log_tool(
     path: str | None = None,
     tool: str | None = None,
@@ -1320,7 +1327,7 @@ def get_audit_log_tool(
     return list_result(entries, meta={"truncated": len(entries) >= limit})
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def list_vaults_tool() -> dict:
     """List the vault(s) the current identity (API key or GitHub login) may
     access. Returns [{name, description, is_default}]. Call this at the
@@ -1348,7 +1355,7 @@ def list_vaults_tool() -> dict:
     ])
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def lint_schema_tool(vault: str | None = None) -> dict:
     """Validate every note's frontmatter against the enum fields declared in
     the vault's _AI_INSTRUCTIONS.md (under a "Frontmatter Schema" heading,
@@ -1361,14 +1368,14 @@ def lint_schema_tool(vault: str | None = None) -> dict:
     return read_result(None, lint_schema(_index))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def get_broken_links_tool(vault: str | None = None) -> dict:
     """Find all wikilinks in the vault that point to non-existent notes.
     data.items: [{source, link}]."""
     return list_result(get_broken_links(_index))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def get_orphans_tool(exclude_folders: list[str] | None = None, vault: str | None = None) -> dict:
     """Find notes that no other note links to.
     Excludes Journal and Templates by default. data.items is a list of paths."""
@@ -1377,7 +1384,7 @@ def get_orphans_tool(exclude_folders: list[str] | None = None, vault: str | None
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def get_link_graph_tool(
     root: str,
     depth: int = 2,
@@ -1396,14 +1403,14 @@ def get_link_graph_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def get_vault_stats_tool(vault: str | None = None) -> dict:
     """Return vault statistics: note count, link count, orphans, broken links,
     most-linked notes. Vault-wide, so the envelope carries no `path`."""
     return read_result(None, get_vault_stats(_index))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def list_all_tags_tool(
     sort_by: str = "count",
     mode: str = "flat",
@@ -1424,7 +1431,7 @@ def list_all_tags_tool(
     raise ValueError(f"Unknown mode: {mode!r}; expected 'flat' or 'tree'")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def get_tasks_tool(
     status: str = "open",
     folder: str = "",
@@ -1445,7 +1452,7 @@ def get_tasks_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def get_periodic_note_tool(period: str = "daily", date: str = "today", vault: str | None = None) -> dict:
     """Read or preview a periodic note.
     period: 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'yearly'.
@@ -1455,7 +1462,7 @@ def get_periodic_note_tool(period: str = "daily", date: str = "today", vault: st
     return _read_envelope(result.get("path"), result)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def resolve_alias_tool(name: str, vault: str | None = None) -> dict:
     """Resolve a note alias or stem to its real vault path.
     `path` and data.resolved are null (and `path` omitted) if not found."""
@@ -1463,7 +1470,7 @@ def resolve_alias_tool(name: str, vault: str | None = None) -> dict:
     return read_result(resolved, {"name": name, "resolved": resolved})
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def query_notes_tool(
     tags: list[str] | None = None,
     status: str | None = None,
@@ -1495,14 +1502,14 @@ def query_notes_tool(
 
 # ── Attachments ───────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def list_attachments_tool(folder: str = "", vault: str | None = None) -> dict:
     """List all non-Markdown files in the vault: images, PDFs, audio, etc.
     data.items: [{path, size_bytes, mime_type, mtime}]."""
     return list_result(list_attachments(folder))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def read_attachment_tool(path: str, vault: str | None = None) -> dict:
     """Read an attachment file. data.content is a UTF-8 string for text files,
     or base64-encoded bytes for binary ones (images, PDFs) — data.mime_type
@@ -1747,7 +1754,7 @@ async def attachment_route(request: Request) -> Response:
 
 # ── Templates ─────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def list_templates_tool(vault: str | None = None) -> dict:
     """List all template files in the Templates/ folder.
     data.items is a list of template paths."""
@@ -1787,13 +1794,13 @@ def create_from_template_tool(
 
 if _feature_flags.enable_canvas:
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def list_canvases_tool(vault: str | None = None) -> dict:
         """List all Obsidian Canvas (.canvas) files in the vault.
         data.items is a list of .canvas paths."""
         return list_result(list_canvases())
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def read_canvas_tool(path: str, vault: str | None = None) -> dict:
         """Read an Obsidian Canvas file.
         data: {nodes: [{id, type, text, file, x, y}], edges: [{from, to, label}]}."""
@@ -1856,13 +1863,13 @@ if _feature_flags.enable_canvas:
 
 if _feature_flags.enable_excalidraw:
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def list_excalidraw_tool(vault: str | None = None) -> dict:
         """List all Obsidian Excalidraw (*.excalidraw.md) files in the vault.
         data.items is a list of *.excalidraw.md paths."""
         return list_result(list_excalidraw())
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def read_excalidraw_tool(path: str, vault: str | None = None) -> dict:
         """Read an Obsidian Excalidraw file.
         data: {elements, app_state, files}."""
@@ -1922,7 +1929,7 @@ if _feature_flags.enable_excalidraw:
 
 if _feature_flags.enable_kanban:
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def read_kanban_tool(path: str, vault: str | None = None) -> dict:
         """Read an Obsidian Kanban board (requires kanban-plugin in frontmatter).
         data: {plugin, columns: [{name, cards: [{text, done}]}], total_cards}."""
@@ -2023,13 +2030,13 @@ if _feature_flags.enable_kanban:
 
 if _feature_flags.enable_bases:
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def list_bases_tool(vault: str | None = None) -> dict:
         """List all Obsidian Bases (.base) files in the vault.
         data.items is a list of .base paths."""
         return list_result(list_bases())
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def read_base_tool(path: str, vault: str | None = None) -> dict:
         """Read an Obsidian Bases file.
         data: {filters, formulas, properties, views}."""
@@ -2106,7 +2113,7 @@ if _feature_flags.enable_bases:
 
 # ── Folders ───────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def list_folder_tool(path: str = "", recursive: bool = False, max_depth: int | None = None, vault: str | None = None) -> dict:
     """List the contents of a vault folder (non-hidden items only).
     path='': root of the vault.
@@ -2117,7 +2124,7 @@ def list_folder_tool(path: str = "", recursive: bool = False, max_depth: int | N
     return _read_envelope(result.get("path", path), result, meta={"recursive": recursive})
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def list_files_tool(folder: str = "", extension: str | None = None, vault: str | None = None) -> dict:
     """List every file in the vault (or a subfolder), any type — not just
     notes/attachments/bases/canvases (e.g. .lock files, stray non-Markdown
@@ -2158,7 +2165,7 @@ def list_trash_tool(vault: str | None = None) -> dict:
 
 
 if _feature_flags.enable_delete:
-    mcp.tool()(list_trash_tool)
+    mcp.tool(annotations=_READ_ONLY)(list_trash_tool)
 
 
 # ── MCP Resources ─────────────────────────────────────────────────────────────
